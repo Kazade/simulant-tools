@@ -14,6 +14,7 @@ setup(
     name=NAME,
     version=VERSION,
     packages=PACKAGES,
+    scripts=['simulant'],
     author=AUTHOR,
     description=DESCRIPTION,
     long_description=LONG_DESCRIPTION,
