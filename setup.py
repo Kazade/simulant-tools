@@ -8,7 +8,7 @@ DESCRIPTION = 'Tools to harness the Simulant Game Engine'
 URL = "https://simulant-engine.appspot.com/"
 LONG_DESCRIPTION = open(os.path.join(os.path.dirname(__file__), 'README.md')).read()
 AUTHOR = 'Luke Benstead'
-VERSION = '0.1-alpha'
+VERSION = '0.1a0'
 
 setup(
     name=NAME,
