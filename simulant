@@ -720,6 +720,10 @@ def main():
 
     opts = parser.parse_args()
 
+    if not opts.subcommand:
+        parser.print_help()
+        return 0
+
     return COMMAND_LOOKUP[opts.subcommand](opts)
 
 
