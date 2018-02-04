@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import print_function
 
 import argparse
 import getpass
@@ -14,7 +15,15 @@ import tempfile
 from io import BytesIO
 from os.path import abspath, dirname, exists, join, split, splitext
 from subprocess import Popen
-from urllib.request import urlopen
+
+try:
+    from urllib.request import urlopen
+except ImportError:
+    # Python 2
+    from urllib import urlopen
+    # Hacky compatibility
+    input = raw_input
+
 from zipfile import ZipFile
 
 PLACEHOLDER = "__project_name__"
@@ -183,7 +192,7 @@ def build(args, build_output=None):
     if build_type == "release":
         cmake_params += " -DCMAKE_BUILD_TYPE=Release"
 
-    if not args.use_global_simulant:
+    if not getattr(args, "use_global_simulant", False):
         library_dir = join(project_dir, _calculate_simulant_dir(args))
 
         cmake_params += " -DSIMULANT_INCLUDE_FOLDER={}".format(
