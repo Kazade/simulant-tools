@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 from io import BytesIO
-from os.path import abspath, dirname, exists, join, split, splitext
+from os.path import abspath, dirname, exists, join, split, splitext, expanduser
 from subprocess import Popen
 
 try:
@@ -32,6 +32,7 @@ THIS_DIR = dirname(__file__)
 
 POTENTIAL_TEMPLATE_DIRS = [
     THIS_DIR,
+    expanduser("~/.local/share/simulant"),
     "/usr/local/share/simulant",
     "/usr/share/simulant"
 ]
@@ -39,6 +40,7 @@ POTENTIAL_TEMPLATE_DIRS = [
 POTENTIAL_TOOLCHAIN_DIRS = [
     join(THIS_DIR, "toolchains"),
     join(dirname(THIS_DIR), "toolchains"),
+    expanduser("~/.local/share/simulant/toolchains"),
     "/usr/local/share/simulant/toolchains",
     "/usr/share/simulant/toolchains"
 ]
