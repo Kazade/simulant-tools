@@ -30,5 +30,7 @@ setup(
         'Topic :: Software Development :: Build Tools',
     ],
     include_package_data=True,
-    package_dir={'template': 'template'}
+    data_files=[
+        ('template', ['template/sources/main.cpp'])
+    ]
 )
