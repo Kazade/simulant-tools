@@ -31,6 +31,10 @@ setup(
     ],
     include_package_data=True,
     data_files=[
-        ('template', ['template/sources/main.cpp'])
+        ('share/simulant/template/sources', ['template/sources/main.cpp']),
+        ('share/simulant/template/sources/scenes', ['template/sources/scenes/game.cpp']),
+        ('share/simulant/template/sources/scenes', ['template/sources/scenes/game.h']),
+        ('share/simulant/template/', ['template/CMakeLists.txt']),
+        ('share/simulant/template/', ['template/simulant.json']),
     ]
 )
