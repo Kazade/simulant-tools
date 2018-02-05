@@ -29,5 +29,6 @@ setup(
         'Programming Language :: Python',
         'Topic :: Software Development :: Build Tools',
     ],
-    include_package_data=True
+    include_package_data=True,
+    package_dir={'template': 'template'}
 )
