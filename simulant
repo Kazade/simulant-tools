@@ -2,27 +2,27 @@
 from __future__ import print_function
 
 import argparse
-import getpass
-import itertools
 import json
 import os
 import platform
-import pwd
 import shutil
 import subprocess
 import sys
 import tempfile
 from io import BytesIO
 from os.path import abspath, dirname, exists, join, split, splitext, expanduser
-from subprocess import Popen
 
 try:
+    from subprocess import DEVNULL
     from urllib.request import urlopen
 except ImportError:
     # Python 2
     from urllib import urlopen
     # Hacky compatibility
-    input = raw_input
+    input = raw_input  # noqa
+
+    # Simulate subprocess.DEVNULL
+    DEVNULL = open(os.devnull, 'wb')
 
 from zipfile import ZipFile
 
@@ -65,7 +65,7 @@ def _locate_toolchain_file(name):
     for path in POTENTIAL_TOOLCHAIN_DIRS:
         path = abspath(path)
 
-        toolchain = join(path, "{}.cmake".format(name))
+        toolchain = join(path, name)
         if exists(toolchain):
             return toolchain
 
@@ -209,15 +209,19 @@ def build(args, build_output=None):
         if not _check_tool("docker"):
             return 3
 
-        toolchain = _locate_toolchain_file("Dreamcast")
+        toolchain = _locate_toolchain_file("Dreamcast.cmake")
         if not toolchain:
             print("Unable to find the Dreamcast toolchain file")
             return 4
 
         container_build_dir = join("/simulant-project", build_dir)
 
+        # The Docker container can't access the toolchain directory
+        # directly so we need to copy it to the build dir
+        shutil.copy(toolchain, os.path.join("build", "Dreamcast.cmake"))
+
         cmake_params += " -DCMAKE_TOOLCHAIN_FILE={}".format(
-            join("/simulant-project", "libraries", "Dreamcast.cmake")
+            join("/simulant-project", "build", "Dreamcast.cmake")
         )
 
         _start_docker_container(container_build_dir)
@@ -420,7 +424,7 @@ def _start_docker_container(working_dir):
     ]
 
     for cmd in commands:
-        subprocess.call(cmd.split(), stdout=subprocess.DEVNULL)
+        subprocess.call(cmd.split(), stdout=DEVNULL)
 
     run_command = "sudo docker run -it -d --name={} -v {} --workdir={} kazade/dreamcast-sdk bash --login".format(
         DOCKER_CONTAINER_NAME, volume_mount, working_dir
@@ -488,7 +492,13 @@ Game Title    : {name}
     # Copy assets to the output directory
     shutil.copytree("assets", join(package_dir, "assets"))
 
-    template = join("/simulant-project", "libraries/IP.TMPL")
+    template = _locate_toolchain_file("IP.TMPL")
+
+    # We need to copy the template into the container so that it
+    # can be found.
+    shutil.copy(template, join(package_dir, "IP.TMPL"))
+
+    template = join(package_dir, "IP.TMPL")
     text = join(package_dir, "ip.txt")
 
     with open("simulant.json", "r") as fin:
@@ -502,6 +512,9 @@ Game Title    : {name}
         join("/simulant-project", text),
         join("/simulant-project", package_dir, "IP.BIN")
     )
+
+    # Remove the IP.TMPL we created
+    os.remove(template)
 
     # Don't need the text file any more
     os.remove(text)
