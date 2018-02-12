@@ -32,8 +32,8 @@ setup(
     include_package_data=True,
     data_files=[
         ('share/simulant/template/assets', ['template/assets/README']),
-        ('share/simulant/template/libraries', ['template/libraries/Dreamcast.cmake']),
-        ('share/simulant/template/libraries', ['template/libraries/IP.TMPL']),
+        ('share/simulant/toolchains', ['toolchains/Dreamcast.cmake']),
+        ('share/simulant/toolchains', ['toolchains/IP.TMPL']),
         ('share/simulant/template/libraries', ['template/libraries/README']),
         ('share/simulant/template/sources', ['template/sources/main.cpp']),
         ('share/simulant/template/sources/scenes', ['template/sources/scenes/game.cpp']),

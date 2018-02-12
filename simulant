@@ -428,6 +428,7 @@ def _start_docker_container(working_dir):
 
     subprocess.check_call(run_command, shell=True)
 
+
 def _run_docker_command(command, check=True):
     run_command = 'sudo docker exec -it {} /bin/bash -c "{}"'.format(DOCKER_CONTAINER_NAME, command)
 
@@ -451,7 +452,7 @@ def _scramble_binary(binary, dest):
     commands = [
         "source /etc/bash.bashrc; sh-elf-objcopy -R .stack -O binary -S -g {} {}".format(binary, bin_file),
         "source /etc/bash.bashrc; /opt/toolchains/dc/kos/utils/scramble/scramble {} {}".format(bin_file, dest),
-#        "rm {}".format(bin_file) # Remove intermediate file
+        "rm {}".format(bin_file)  # Remove intermediate file
     ]
 
     for command in commands:
