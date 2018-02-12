@@ -638,7 +638,7 @@ def update(args):
 
             shutil.copytree(*args)
             
-    print("Downloading assets...")
+    print("\nDownloading assets...")
 
     url = "{}/{}".format(DOWNLOAD_ROOT, "simulant-assets.zip")
     url = urlopen(url)
