@@ -646,12 +646,12 @@ def update(args):
                 join(tempdir, splitext(download)[0], "lib", build_type),
                 join(target_dir, "lib")
             ]
-            
+
             if exists(args[1]):
                 shutil.rmtree(args[1])
 
             shutil.copytree(*args)
-            
+
     print("\nDownloading assets...")
 
     url = "{}/{}".format(DOWNLOAD_ROOT, "simulant-assets.zip")
@@ -663,12 +663,19 @@ def update(args):
     print("\nDone!\n")
 
 
+def _run_requires_package(platform):
+    return platform == "dreamcast"
+
+
 def run(args):
     if not _check_project():
         return 1
 
     if args.rebuild:
-        build(args)  # Trigger a build
+        if _run_requires_package(args.platform):
+            package(args)
+        else:
+            build(args)  # Trigger a build
 
     build_dir = _calculate_build_dir(args)
 
@@ -680,13 +687,13 @@ def run(args):
     env["LD_LIBRARY_PATH"] = join(_calculate_simulant_dir(args), "lib")
 
     if args.platform == "dreamcast":
-        subprocess.run(
+        subprocess.call(
             ["lxdream", "-b", executable + ".cdi"],
             cwd=build_dir,
             env=env
         )
     else:
-        subprocess.run(
+        subprocess.call(
             [abspath(join(build_dir, executable))],
             cwd=build_dir,
             env=env
