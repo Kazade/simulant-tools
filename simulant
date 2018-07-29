@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 from __future__ import print_function
 
 import argparse
@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 from io import BytesIO
-from os.path import abspath, dirname, exists, join, split, splitext, expanduser
+from os.path import abspath, dirname, exists, join, splitext, expanduser
 
 try:
     from subprocess import DEVNULL
@@ -647,10 +647,39 @@ def update(args):
                 join(target_dir, "lib")
             ]
 
+            if system == "Linux" and os.path.exists(
+                    os.path.join(args[0], "libsimulant.so")):
+
+                # FIXME: This should move .so to .so.X.X.X then symlink to
+                # that, currently
+                # it does things the other way (symlinks to .so)
+
+                # Linux .so files need to be symlinked, so we do that now
+                print("\nGenerating symlinks...")
+
+                soname = open(
+                    os.path.join(args[0], "simulant.soname")
+                ).read().strip()
+
+                version = open(
+                    os.path.join(args[0], "simulant.version")
+                ).read().strip()
+
+                os.symlink(
+                    "libsimulant.so",
+                    os.path.join(args[0], "libsimulant.so.{}".format(soname))
+                )
+
+                os.symlink(
+                    "libsimulant.so",
+                    os.path.join(args[0], "libsimulant.so.{}".format(version))
+                )
+                print("Continuing download", end='', flush=True)
+
             if exists(args[1]):
                 shutil.rmtree(args[1])
 
-            shutil.copytree(*args)
+            shutil.copytree(*args, symlinks=True)
 
     print("\nDownloading assets...")
 
