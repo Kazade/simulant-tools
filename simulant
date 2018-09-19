@@ -449,9 +449,9 @@ def _start_docker_container(working_dir):
     except docker.errors.NotFound:
         pass
 
-    client.containers.run(
+    container = client.containers.run(
         "kazade/dreamcast-sdk",
-        "bash --login",
+        "/bin/bash --login",
         detach=True,
         volumes={
             abspath("."): {
@@ -464,6 +464,9 @@ def _start_docker_container(working_dir):
         name=DOCKER_CONTAINER_NAME,
         working_dir=working_dir
     )
+
+    print("Started docker container: %s" % container)
+    print(container.logs().decode("utf-8"))
 
 
 def _run_docker_command(command, check=True):
