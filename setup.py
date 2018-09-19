@@ -20,6 +20,9 @@ setup(
     long_description=LONG_DESCRIPTION,
     keywords=["gamedev", "game", "engine", "simulant"],
     url=URL,
+    install_requires=[
+        'docker'
+    ],
     classifiers=[
         'Environment :: Console'
         'Development Status :: 3 - Alpha',
