@@ -39,7 +39,7 @@ ELSE()
         $ENV{KOS_PORTS}/include/libGL
         $ENV{KOS_PORTS}/include/zlib
     )
-    LINK_LIBRARIES(GL z m)
+    LINK_LIBRARIES(GLdc z m)
 ENDIF()
 
 FILE(GLOB_RECURSE SOURCES FOLLOW_SYMLINKS ${CMAKE_SOURCE_DIR}/sources/*.cpp)
