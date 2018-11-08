@@ -21,7 +21,9 @@ setup(
     keywords=["gamedev", "game", "engine", "simulant"],
     url=URL,
     install_requires=[
-        'docker'
+        'docker',
+        'clint',
+        'requests'
     ],
     classifiers=[
         'Environment :: Console'
