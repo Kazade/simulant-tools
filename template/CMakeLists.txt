@@ -46,6 +46,11 @@ FILE(GLOB_RECURSE SOURCES FOLLOW_SYMLINKS ${CMAKE_SOURCE_DIR}/sources/*.cpp)
 
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
+# This should happen automatically, but, it doesn't seem to on the Dreamcast
+if (NOT CMAKE_BUILD_TYPE MATCHES Debug)
+    add_definitions(-DNDEBUG)
+endif()
+
 add_definitions("-Wall")
 add_executable(__project_name_lower__ ${SOURCES})
 

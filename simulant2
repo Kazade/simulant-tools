@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import requests
 import os
-from os.path import splitext, join
+from os.path import splitext, join, exists
 import sys
 import zipfile
 from clint.textui import progress
@@ -206,8 +206,8 @@ class Platform(object):
         self.is_native = is_native
         self.container = None
 
-    def _run_command(self, cmd, cwd):
-        if self.required_docker_image:
+    def _run_command(self, cmd, cwd, use_docker_image=True):
+        if use_docker_image and self.required_docker_image:
             assert(self.container)
 
             exit_code, output = self.container.exec_run(
@@ -218,10 +218,11 @@ class Platform(object):
             if exit_code:
                 raise IOError(output.decode("utf-8"))
             else:
-                print(output.decode("utf-8"))
+                return output.decode("utf-8")
 
         else:
-            subprocess.check_call(cmd, cwd=cwd)
+            output = subprocess.check_output(cmd, cwd=cwd)
+            return output
 
     def _generate_cmake_args(self, release=False):
         libraries = _project_path("libraries")
@@ -272,7 +273,7 @@ class Platform(object):
                 self._calc_build_dir(release=release)
             )
 
-    def build(self, release=False, rebuild=False):
+    def build(self, release=False, rebuild=False, print_output=True):
         self._prepare(release=release)
 
         if rebuild:
@@ -291,8 +292,8 @@ class Platform(object):
 
         cmake_cmd = ["cmake"] + cmake_args
 
-        self._run_command(cmake_cmd, cwd=build_dir)
-        self._run_command(["make"], cwd=build_dir)
+        print(self._run_command(cmake_cmd, cwd=build_dir))
+        print(self._run_command(["make"], cwd=build_dir))
 
     def run(self, rebuild=False, release=False):
         if rebuild:
@@ -358,7 +359,7 @@ class Platform(object):
                         "install {libs} /app/lib".format(
                             libs=_project_path("libraries") + self.target + "lib/*.so"
                         )
-                    ]
+                    ],
                     "sources": [
                         {"type": "dir", "path": build_dir}
                     ]
@@ -410,6 +411,154 @@ class Dreamcast(Platform):
 
         return args + root
 
+    def _scramble_binary(self, cwd, binary, dest):
+        bin_file = splitext(binary)[0] + ".bin"
+        commands = [
+            "source /etc/bash.bashrc; sh-elf-objcopy -R .stack -O binary -S -g {} {}".format(binary, bin_file),
+            "source /etc/bash.bashrc; /opt/toolchains/dc/kos/utils/scramble/scramble {} {}".format(bin_file, dest),
+            "rm {}".format(bin_file)  # Remove intermediate file
+        ]
+
+        print("Scrambling binary".ljust(_STR_LENGTH), end='')
+        for command in commands:
+            self._run_command(command.split(), cwd=cwd)
+        print("[ OK ]")
+
+    def _generate_ip_bin(self, cwd, template, text, dest):
+        command = "IP_TEMPLATE_FILE={template} /opt/toolchains/dc/kos/utils/makeip/makeip {text} {dest}".format(
+            template=template, dest=dest, text=text
+        ).split()
+
+
+        print("Generating IP.BIN".ljust(_STR_LENGTH), end='')
+        self._run_command(command, cwd=cwd)
+        print("[ OK ]")
+        return dest
+
+    def package(self):
+
+        IP_TXT_TEMPLATE = """
+Hardware ID   : SEGA SEGAKATANA
+Maker ID      : SEGA ENTERPRISES
+Device Info   : 0000 CD-ROM1/1
+Area Symbols  : JUE
+Peripherals   : E000F10
+Product No    : T0000
+Version       : V1.000
+Release Date  : 20000627
+Boot Filename : 1ST_READ.BIN
+SW Maker Name : {author}
+Game Title    : {name}
+""".strip()
+
+        # Perform a release rebuild
+        self.build(release=True, rebuild=True)
+
+        build_dir = self._calc_build_dir(release=True)
+        package_dir = os.path.join(_project_path("packages"), self.target)
+
+        if exists(package_dir):
+            shutil.rmtree(package_dir)
+
+        os.makedirs(package_dir)
+
+        # Search for the .elf binary in the build directory
+        binary = next(x for x in os.listdir(build_dir) if x.endswith(".elf"))
+        binary = join(build_dir, binary)
+
+        # Copy assets to the output directory
+        shutil.copytree("assets", join(package_dir, "assets"))
+
+        template = _find_shipped_path("toolchains/IP.TMPL")
+
+        # We need to copy the template into the container so that it
+        # can be found.
+        shutil.copy(template, join(package_dir, "IP.TMPL"))
+
+        template = join(package_dir, "IP.TMPL")
+        text = join(package_dir, "ip.txt")
+
+        with open("simulant.json", "r") as fin:
+            data = json.loads(fin.read())
+
+        with open(text, "w") as fout:
+            fout.write(IP_TXT_TEMPLATE.format(**data))
+
+        ip_bin = self._generate_ip_bin(
+            package_dir,
+            template,
+            text,
+            join(package_dir, "IP.BIN")
+        )
+
+        # Remove the IP.TMPL we created
+        os.remove(template)
+
+        # Don't need the text file any more
+        os.remove(text)
+
+        self._scramble_binary(
+            package_dir,
+            binary,
+            join(package_dir, "1ST_READ.BIN")
+        )
+
+        print("Building ISO".ljust(_STR_LENGTH), end='')
+        self._run_command(
+            "mkisofs -C 0,11702 -V {title} -G {ip_bin} -joliet -rock -l -o {name}.iso {package_dir}".format(
+                title=data["name"],
+                ip_bin=ip_bin,
+                name=data["executable"],
+                package_dir=package_dir
+            ).split(),
+            cwd=package_dir
+        )
+        print("[ OK ]")
+
+        print("Generating CDI".ljust(_STR_LENGTH), end='')
+        self._run_command(
+            "/opt/toolchains/dc/kos/utils/img4dc/build/cdi4dc/cdi4dc {name}.iso {name}.cdi".format(
+                name=data["executable"]
+            ).split(),
+            cwd=package_dir
+        )
+        print("[ OK ]")
+
+        return os.path.join(package_dir, "%s.cdi" % data["executable"])
+
+    def run(self, **kwargs):
+        supported_emulators = ("redream", "lxdream")
+        commands = {
+            "lxdream": "lxdream -b",
+            "redream": "redream"
+        }
+
+        # We need to package things up to run the dreamcast build
+        cdi_path = self.package()
+
+        for emu in supported_emulators:
+            try:
+                self._run_command(
+                    ("%s --help" % emu).split(),
+                    cwd=os.path.dirname(cdi_path),
+                    use_docker_image=False
+                )
+                break
+            except subprocess.CalledProcessError:
+                print("Unable to find %s" % emu)
+                continue
+        else:
+            print(
+                "Unable to find a supported emulator. Install one of %s" % supported_emulators
+            )
+            sys.exit(1)
+
+        self._run_command(
+            ("%s %s" % (commands[emu], cdi_path)).split(),
+            cwd=os.path.dirname(cdi_path),
+            use_docker_image=False
+        )
+
 
 class Android(Platform):
     required_docker_image = "kazade/android-sdk"
@@ -419,7 +568,7 @@ class Android(Platform):
 def update(**kwargs):
     print("Downloading assets")
 
-    asset_dir = _project_path("assets/simulant")
+    asset_dir = _project_path("assets")
     if os.path.exists(asset_dir):
         shutil.rmtree(asset_dir)
 
@@ -429,7 +578,6 @@ def update(**kwargs):
         _DOWNLOAD_ROOT + "/master/assets.zip",
         asset_dir
     )
-    print("[ OK ]")
 
     targets = ("linux-x64-gcc", "windows-x64-mingw", "dreamcast-sh4-gcc")
 
@@ -449,8 +597,6 @@ def update(**kwargs):
                 target=target
             ), lib_dir
         )
-
-        print("[ OK ]")
 
 
 def start(name, target_folder, force=False):
@@ -619,3 +765,4 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
