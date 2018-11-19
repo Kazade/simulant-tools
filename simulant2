@@ -182,19 +182,6 @@ def _start_docker_container(image, working_dir):
 
     return container
 
-    # We need to add a user to the container so that we can run commands
-    # with the same user as the host - otherwise files created end up
-    # with root permissions.
-
-    cmd = "adduser -u {uid} {username}".format(
-        uid=os.getuid(),
-        username=os.getlogin()
-    )
-    exit_code, output = container.exec_run('/bin/bash -c "%s"' % cmd, tty=True)
-    if exit_code:
-        raise IOError(output.decode("utf-8"))
-    return container
-
 
 class Platform(object):
     required_docker_image = None
@@ -222,7 +209,7 @@ class Platform(object):
 
         else:
             output = subprocess.check_output(cmd, cwd=cwd)
-            return output
+            return output.decode("utf-8")
 
     def _generate_cmake_args(self, release=False):
         libraries = _project_path("libraries")
