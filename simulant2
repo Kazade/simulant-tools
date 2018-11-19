@@ -513,15 +513,23 @@ Game Title    : {name}
 
         return os.path.join(package_dir, "%s.cdi" % data["executable"])
 
-    def run(self, **kwargs):
+    def run(self, rebuild=True, release=True):
         supported_emulators = ("redream", "lxdream")
         commands = {
             "lxdream": "lxdream -b",
             "redream": "redream"
         }
 
-        # We need to package things up to run the dreamcast build
-        cdi_path = self.package()
+        package_dir = os.path.join(_project_path("packages"), self.target)
+
+        with open("simulant.json", "r") as fin:
+            data = json.loads(fin.read())
+
+        cdi_path = os.path.join(package_dir, data["executable"] + ".cdi")
+
+        if not os.path.exists(cdi_path) or rebuild:
+            # We need to package things up to run the dreamcast build
+            cdi_path = self.package()
 
         for emu in supported_emulators:
             try:
