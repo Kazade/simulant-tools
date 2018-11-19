@@ -1,88 +1,41 @@
 #!/usr/bin/env python3
-from __future__ import print_function
-
-import argparse
-import logging
-import docker
-import docker.types
-import json
-import gzip
 import requests
 import os
-import platform
-import shutil
-import subprocess
+from os.path import splitext, join, exists
 import sys
-import tempfile
-from io import BytesIO
-from os.path import abspath, dirname, exists, join, splitext, expanduser
+import zipfile
+from clint.textui import progress
+import argparse
+import shutil
+import platform
+import subprocess
+import docker
+import logging
+import site
+import json
 
-try:
-    from subprocess import DEVNULL
-    from urllib.request import urlopen
-except ImportError:
-    # Python 2
-    from urllib import urlopen
-    # Hacky compatibility
-    input = raw_input  # noqa
 
-    # Simulate subprocess.DEVNULL
-    DEVNULL = open(os.devnull, 'wb')
-
-from zipfile import ZipFile
+_STR_LENGTH = 120
+_PROJECT_ROOT = None
+_DOWNLOAD_ROOT = "https://storage.googleapis.com/staging.simulant-engine.appspot.com"
 
 PLACEHOLDER = "__project_name__"
 
-THIS_DIR = dirname(__file__)
 
-POTENTIAL_TEMPLATE_DIRS = [
-    THIS_DIR,
-    expanduser("~/.local/share/simulant"),
-    "/usr/local/share/simulant",
-    "/usr/share/simulant"
-]
-
-POTENTIAL_TOOLCHAIN_DIRS = [
-    join(THIS_DIR, "toolchains"),
-    join(dirname(THIS_DIR), "toolchains"),
-    expanduser("~/.local/share/simulant/toolchains"),
-    "/usr/local/share/simulant/toolchains",
-    "/usr/share/simulant/toolchains"
-]
+class UnsupportedPlatformError(ValueError):
+    def __init__(self, platform):
+        super(UnsupportedPlatformError, self).__init__(
+            "Your development platform (%s) is currently unsupported" % platform
+        )
 
 
-LIBRARY_PATH_TEMPLATE = "libraries/{build_type}/{platform}-{architecture}/"
-BUILD_PATH_TEMPLATE = "build/{build_type}/{platform}-{architecture}/"
+def _project_path(file_path):
+    global _PROJECT_ROOT
 
-DOCKER_CONTAINER_NAME = "simulant-dc-build"
+    if not _PROJECT_ROOT:
+        _PROJECT_ROOT = _find_project_root()
 
-
-def _check_tool(name):
-    try:
-        subprocess.check_output(["which", name])
-        return True
-    except subprocess.CalledProcessError:
-        print("{} is not installed, or not found".format(name))
-        return False
-
-
-def _locate_toolchain_file(name):
-    for path in POTENTIAL_TOOLCHAIN_DIRS:
-        path = abspath(path)
-
-        toolchain = join(path, name)
-        if exists(toolchain):
-            return toolchain
-
-
-def _locate_template_folder():
-    for path in POTENTIAL_TEMPLATE_DIRS:
-        path = abspath(path)
-
-        template = join(path, "template")
-
-        if exists(template):
-            return template
+    return os.path.join(_PROJECT_ROOT, file_path)
 
 
 def _rename_files_and_directories(search, replacement, directory):
@@ -117,397 +70,361 @@ def _search_replace(search, replacement, directory, extensions=[".cpp", ".h", ".
                     f.write(s)
 
 
-def _check_project():
-    if not exists("simulant.json"):
-        print("ERROR: Unable to find simulant.json")
-        return False
+def _find_project_root():
+    SIMULANT_CONFIG = "simulant.json"
 
-    return True
+    path = os.path.abspath(SIMULANT_CONFIG)
+    while not os.path.exists(path):
+        new_path = os.path.dirname(path)
+        if new_path == path:
+            print("Unable to find {0}. Are you in the right directory?".format(
+                SIMULANT_CONFIG
+            ))
 
+        path = new_path
 
-class BuildOutput:
-    build_dir = None
+    return os.path.dirname(path)
 
 
-def _calculate_platform(platform_name):
-    if platform_name == "native":
-        return platform.system().lower()
-    else:
-        return platform_name.lower()
+def _find_shipped_path(path):
+    this_dir = os.path.dirname(__file__)
 
+    final = os.path.join(this_dir, path)
+    if os.path.exists(final):
+        return os.path.abspath(final)
 
-def _calculate_build_dir(args):
-    kwargs = {
-        "build_type": "release" if args.release else "debug"
-    }
+    for prefix in site.PREFIXES:
+        final = os.path.join(prefix, path)
+        if os.path.exists(path):
+            return final
 
-    if args.platform == "native":
-        kwargs["platform"] = platform.system().lower()
-        kwargs["architecture"] = platform.machine()
-    elif args.platform == "dreamcast":
-        kwargs["platform"] = "dreamcast"
-        kwargs["architecture"] = "sh4"
-        kwargs["build_type"] = "release"
-    else:
-        raise ValueError("{} not yet supported".format(args.platform))
+    raise ValueError("Unable to find: %s" % path)
 
-    return BUILD_PATH_TEMPLATE.format(**kwargs)
 
+def _download_zip_and_extract(zip_file, target_dir):
+    r = requests.get(zip_file, stream=True)
+    path = os.path.join(target_dir, zip_file.rsplit("/")[-1])
 
-def _calculate_simulant_dir(args):
-    kwargs = {
-        "build_type": "release" if args.release else "debug"
-    }
+    with open(path, 'wb') as f:
+        total_length = int(r.headers.get('content-length'))
+        for chunk in progress.bar(
+            r.iter_content(chunk_size=1024),
+            expected_size=(total_length/1024) + 1
+        ):
+            if chunk:
+                f.write(chunk)
+                f.flush()
 
-    if args.platform == "native":
-        kwargs["platform"] = platform.system().lower()
-        kwargs["architecture"] = platform.machine()
-    elif args.platform == "dreamcast":
-        kwargs["platform"] = "dreamcast"
-        kwargs["architecture"] = "sh4"
-    elif platform.system().lower() in ("linux", "darwin"):
-        kwargs["platform"] = platform.system().lower()
-        kwargs["architecture"] = platform.machine()
-    else:
-        raise ValueError("{} not yet supported".format(args.platform))
+    zip_ref = zipfile.ZipFile(path, 'r')
+    zip_ref.extractall(target_dir)
+    zip_ref.close()
 
-    return LIBRARY_PATH_TEMPLATE.format(**kwargs)
+    os.remove(path)
 
 
-def build(args, build_output=None):
-    if not _check_project():
-        return 1
+def _download_docker_image(image):
 
-    if not _check_tool("cmake"):
-        return 2
-
-    project_dir = os.getcwd()
-    if args.platform == "dreamcast":
-        project_dir = "/simulant-project"
-        args.use_global_simulant = False
-        args.release = True
-
-    platform = _calculate_platform(args.platform)
-    arch = args.platform
-    build_dir = _calculate_build_dir(args)
-    build_type = "release" if args.release else "debug"
-
-    if not exists(build_dir):
-        os.makedirs(build_dir)
-
-    cmake_params = ""
-    if build_type == "release":
-        cmake_params += " -DCMAKE_BUILD_TYPE=Release"
-
-    if not getattr(args, "use_global_simulant", False):
-        library_dir = join(project_dir, _calculate_simulant_dir(args))
-
-        cmake_params += " -DSIMULANT_INCLUDE_FOLDER={}".format(
-            join(library_dir, "include")
-        )
-
-        cmake_params += " -DSIMULANT_LIBRARY_FOLDER={}".format(
-            join(library_dir, "lib")
-        )
-
-    if arch == "dreamcast":
-        if not _check_tool("docker"):
-            return 3
-
-        toolchain = _locate_toolchain_file("Dreamcast.cmake")
-        if not toolchain:
-            print("Unable to find the Dreamcast toolchain file")
-            return 4
-
-        container_build_dir = join("/simulant-project", build_dir)
-
-        # The Docker container can't access the toolchain directory
-        # directly so we need to copy it to the build dir
-        shutil.copy(toolchain, os.path.join("build", "Dreamcast.cmake"))
-
-        cmake_params += " -DCMAKE_TOOLCHAIN_FILE={}".format(
-            join("/simulant-project", "build", "Dreamcast.cmake")
-        )
-
-        _start_docker_container(container_build_dir)
-
-        if build_output:
-            build_output.build_dir = build_dir
-
-        return _run_docker_command(
-            'source /etc/bash.bashrc; cmake {} ../../.. && make'.format(cmake_params),
-            check=False
-        )
-
-    elif arch == "windows" and platform.system() == "Linux":
-        # We support cross-compiling from Linux to Windows using mingw64
-        commands = [
-            "mingw64-cmake" + cmake_params,
-            "make"
-        ]
-
-        commands[0] += " ../../.."
-        commands = [cmd.split() for cmd in commands]
-
-    else:
-        commands = [
-            "cmake" + cmake_params,
-            "make"
-        ]
-
-        commands[0] += " ../../.."
-        commands = [cmd.split() for cmd in commands]
-
-    for cmd in commands:
-        print(cmd)
-        subprocess.check_call(cmd, cwd=build_dir)
-
-    if build_output:
-        build_output.build_dir = build_dir
-
-    return 0
-
-
-def start(args):
-    " Start a Simulant project with a template "
-
-    if "/" in args.project:
-        # FIXME: [a-zA-Z0-9_-]+
-        print("Project name must not contain slashes")
-
-    template_folder = _locate_template_folder()
-
-    if not exists(template_folder):
-        print("Error: Unable to locate Simulant template")
-        return 1
-
-    target_folder = join(abspath(args.target), args.project)
-
-    if exists(target_folder) and not args.force:
-        result = input("The target folder already exists and will be replaced, this cannot be undone. Continue? [y/N] ")
-        if result.lower() != "y":
-            return 0
-        else:
-            # Remove the directory before replacing it
-            shutil.rmtree(target_folder)
-    elif exists(target_folder) and args.force:
-        # If we are forcing this, then just remove the folder without asking!
-        shutil.rmtree(target_folder)
-
-    shutil.copytree(template_folder, target_folder)
-
-    # Rename any files that have the project name in them
-    _rename_files_and_directories("__project_name__", args.project.replace(" ", "_").lower(), target_folder)
-
-    # Replace the project name throughout
-    _search_replace("__project_name__", args.project, target_folder)
-
-    # These two replace with project_name or PROJECT_NAME respectively
-    _search_replace("__project_name_lower__", args.project.lower().replace(" ", "_"), target_folder)
-    _search_replace("__project_name_upper__", args.project.upper().replace(" ", "_"), target_folder)
-
-    pascal_name = args.project.replace("-", " ").title().replace(" ", "")
-
-    # Replace with ProjectName
-    _search_replace("__project_name_pascal__", pascal_name, target_folder)
-
-    # Change to the project directory
-    os.chdir(target_folder)
-
-    # Run the update command to get the latest simulant libraries
-    update(args)
-
-    print("\n\nProject successfully created. Remember to edit simulant.json before packaging!")
-
-    return 0
-
-
-def _generate_flatpak(args, build_dir):
-    META_TEMPLATE = """
-[Application]
-name={package}
-command={executable}
-runtime=org.freedesktop.Platform/x86_64/1.6
-
-[Context]
-shared=network;
-sockets=x11;wayland;pulseaudio;
-devices=dri;
-"""
-
-    DESKTOP_TEMPLATE = """
-[Desktop Entry]
-Name={name}
-Exec={executable}
-Comment={description}
-"""
-
-    APPDATA_TEMPLATE = """
-<?xml version="1.0" encoding="UTF-8" ?>
-<component type="desktop">
-    <id>{package}.desktop</id>
-    <name>{name}</name>
-    <description>{description}</description>
-    <metadata_license>FSFAP</metadata_license>
-</component>
-    """
-
-    with open("simulant.json") as f:
-        data = json.loads(f.read())
-
-    package_dir = join(build_dir, "package")
-
-    if exists(package_dir):
-        shutil.rmtree(package_dir)
-
-    files_dir = join(package_dir, "files")
-    app_dir = join(package_dir, "files/app")
-    share_dir = join(files_dir, "share")
-    applications_dir = join(share_dir, "applications")
-    metainfo_dir = join(share_dir, "app-info/xmls")
-    binary_dir = join(package_dir, "files/bin")
-    library_dir = join(package_dir, "files/lib")
-    export_dir = join(package_dir, "export")
-    desktop_file = join(applications_dir, "{}.desktop".format(
-        data["package"]
-    ))
-    appdata_file = join(metainfo_dir, "{}.xml.gz".format(data["package"]))
-
-    os.makedirs(binary_dir)
-    os.makedirs(app_dir)
-    os.makedirs(share_dir)
-    os.makedirs(library_dir)
-    os.makedirs(export_dir)
-    os.makedirs(dirname(appdata_file))
-    os.makedirs(dirname(desktop_file))
-
-    args.release = True
-    simulant_dir = _calculate_simulant_dir(args)
-
-    for file in [x for x in os.listdir(simulant_dir) if x.endswith(".so")]:
-        shutil.copy(join(simulant_dir, file), join(library_dir, file))
-
-    with open(desktop_file, "w") as fout:
-        fout.write(DESKTOP_TEMPLATE.format(**data))
-
-    with gzip.open(appdata_file, "wb") as fout:
-        fout.write(APPDATA_TEMPLATE.format(**data).lstrip().encode("utf-8"))
-
-    project = data["executable"]
-    executable = join(build_dir, project)
-    assets = join(build_dir, "assets")
-
-    shutil.copy(executable, binary_dir)
-    shutil.copytree(assets, join(files_dir, "assets"))
-
-    with open(join(package_dir, "metadata"), "w") as f:
-        f.write(META_TEMPLATE.format(**data))
-
-    temp_repo = join(build_dir, "repo")
-    try:
-        if exists(temp_repo):
-            shutil.rmtree(temp_repo)
-
-        command = "flatpak build-export --update-appstream {} {}".format(
-            temp_repo, package_dir
-        )
-
-        subprocess.check_call(command.split())
-
-        command = "flatpak build-bundle {} {}.flatpak {}".format(
-            temp_repo,
-            executable,
-            data["package"]
-        )
-
-        subprocess.check_call(command.split())
-    finally:
-        if exists(temp_repo):
-            shutil.rmtree(temp_repo)
-
-
-def _start_docker_container(working_dir):
     client = docker.from_env()
 
     try:
-        client.images.get("kazade/dreamcast-sdk")
+        print(("Checking for Docker image %s" % image).ljust(_STR_LENGTH), end='')
+        client.images.get(image)
+        print("[ OK ]")
     except docker.errors.ImageNotFound:
-        logging.info("Downloading a required Docker image")
+        print("[ NOT FOUND ]")
+        print(("Downloading Docker image %s" % image).ljust(_STR_LENGTH), end='')
         client.images.pull("kazade/dreamcast-sdk")
+        print("[ OK ]")
     except requests.exceptions.ConnectionError:
-        logging.error(
-            "You do not have the required permissions to run Docker commands. \n\n"
-            "Try adding your user to the `docker` group (e.g. `sudo usermod -aG docker $USER`) and then restarting your session."
-        )
+        print("[ FAILED ]")
         sys.exit(1)
 
+def _check_docker_running():
     try:
-        container = client.containers.get(DOCKER_CONTAINER_NAME)
-        container.stop(timeout=1)
-        container.wait()
-        container.remove()
-    except docker.errors.NotFound:
-        pass
+        print("Checking Docker is running".ljust(_STR_LENGTH), end='')
+        client = docker.from_env()
+        client.containers.list()
+        print("[ OK ]")
+    except requests.exceptions.ConnectionError:
+        print("[ FAILED ]")
+
+        logging.error(
+            "Either Docker is not running or you do not have the required permissions to run Docker commands. \n\n"
+            "Try adding your user to the `docker` group (e.g. `sudo usermod -aG docker $USER`) and then restarting your session."
+        )
+
+        sys.exit(1)
+
+
+def _start_docker_container(image, working_dir):
+    client = docker.from_env()
+
+    toolchains_folder = _find_shipped_path("toolchains")
 
     container = client.containers.run(
         "kazade/dreamcast-sdk",
         "/bin/bash --login",
         detach=True,
         volumes={
-            abspath("."): {
-                "bind": "/simulant-project",
+            _find_project_root(): {
+                "bind": _find_project_root(),
+                "mode": "Z"
+            },
+            toolchains_folder: {
+                "bind": toolchains_folder,
                 "mode": "Z"
             }
         },
         tty=True,
         stdin_open=True,
-        name=DOCKER_CONTAINER_NAME,
-        working_dir=working_dir
+        user=os.getuid()
     )
 
-    print("Started docker container: %s" % container)
-    print(container.logs().decode("utf-8"))
+    return container
 
 
-def _run_docker_command(command, check=True):
-    client = docker.from_env()
-    container = client.containers.get(DOCKER_CONTAINER_NAME)
+class Platform(object):
+    required_docker_image = None
+    required_toolchain_file = None
+    requires_package_before_run = False
 
-    exit_code, output = container.exec_run(
-        '/bin/bash -c "%s"' % command,
-        tty=True,
-    )
+    def __init__(self, target, is_native):
+        self.target = target
+        self.is_native = is_native
+        self.container = None
 
-    if exit_code:
-        raise IOError("Error while running a Docker command: %s" % output)
-    else:
-        print(output.decode("utf-8"))
+    def _run_command(self, cmd, cwd, use_docker_image=True):
+        if use_docker_image and self.required_docker_image:
+            assert(self.container)
+
+            exit_code, output = self.container.exec_run(
+                '/bin/bash -c -i "source /etc/bash.bashrc; cd %s; %s"' % (cwd, " ".join(cmd)),
+                tty=True
+            )
+
+            if exit_code:
+                raise IOError(output.decode("utf-8"))
+            else:
+                return output.decode("utf-8")
+
+        else:
+            output = subprocess.check_output(cmd, cwd=cwd)
+            return output.decode("utf-8")
+
+    def _generate_cmake_args(self, release=False):
+        libraries = _project_path("libraries")
+
+        args = []
+
+        if release:
+            args.append("-DCMAKE_BUILD_TYPE=Release")
+
+        if self.required_toolchain_file:
+            args.append("-DCMAKE_TOOLCHAIN_FILE={0}".format(
+                _locate_shipped_file(self.required_toolchain_file)
+            ))
+
+        args.append(
+            "-DSIMULANT_INCLUDE_FOLDER={}".format(
+                join(libraries, self.target, "include")
+            )
+        )
+
+        args.append(
+            "-DSIMULANT_LIBRARY_FOLDER={}".format(
+                join(libraries, self.target, "lib")
+            )
+        )
+
+        args.append("../../..")
+
+        return args
+
+    def _calc_build_dir(self, release=False):
+        return os.path.abspath(
+            "build/{target}/{build_type}".format(
+                target=self.target,
+                build_type="release" if release else "debug"
+            )
+        )
+
+    def check_supported(self, this_platform):
+        raise NotImplementedError()
+
+    def _prepare(self, release=False):
+        if self.required_docker_image:
+            _check_docker_running()
+            _download_docker_image(self.required_docker_image)
+            self.container = _start_docker_container(
+                self.required_docker_image,
+                self._calc_build_dir(release=release)
+            )
+
+    def build(self, release=False, rebuild=False, print_output=True):
+        self._prepare(release=release)
+
+        if rebuild:
+            build_dir = self._calc_build_dir(release=release)
+            if os.path.exists(build_dir):
+                shutil.rmtree(build_dir)
+
+        # Default behaviour is too use cmake to build
+        build_dir = self._calc_build_dir(release=release)
+
+        # Make the target directory
+        if not os.path.exists(build_dir):
+            os.makedirs(build_dir)
+
+        cmake_args = self._generate_cmake_args()
+
+        cmake_cmd = ["cmake"] + cmake_args
+
+        print(self._run_command(cmake_cmd, cwd=build_dir))
+        print(self._run_command(["make"], cwd=build_dir))
+
+    def run(self, rebuild=False, release=False):
+        if rebuild:
+            self.build()
+
+        build_dir = self._calc_build_dir(release=release)
+
+        config = _project_path("simulant.json")
+        libraries = _project_path(os.path.join("libraries", self.target, "lib"))
+
+        with open(config) as f:
+            data = json.loads(f.read())
+            executable = data["executable"]
+
+        env = dict(os.environ)
+        env["LD_LIBRARY_PATH"] = libraries
+
+        subprocess.call(
+            [os.path.abspath(os.path.join(build_dir, executable))],
+            cwd=build_dir,
+            env=env
+        )
+
+    def package(self):
+        # Install flatpak sdk and runtime
+        self._run_command(
+            "flatpak install -y flathub org.freedesktop.Platform//18.08 org.freedesktop.Sdk//18.08".split(),
+            cwd="."
+        )
+
+        # We rebuild the release build which is going to be the
+        # packaged version
+        self.build(release=True, rebuild=True)
+
+        build_dir = self._calc_build_dir(release=True)
+        package_dir = os.path.join(_project_path("packages"), self.target)
+
+        with open(_project_path("simulant.json")) as f:
+            config = json.load(f)
+
+        if os.path.exists(package_dir):
+            shutil.rmtree(package_dir)
+
+        def _generate_manifest():
+            manifest_file = os.path.join(build_dir, config["package"] + ".json")
+
+            data = {
+                "app-id": config["package"],
+                "runtime": "org.freedesktop.Platform",
+                "runtime-version": "18.08",
+                "sdk": "org.freedesktop.Sdk",
+                "command": config["executable"],
+                "modules": [{
+                    "name": config["name"],
+                    "buildsystem": "simple",
+                    "build-commands":[
+                        "install -D {executable} /app/bin/{executable}".format(
+                            executable=config["executable"]
+                        ),
+                        "install {libs} /app/lib".format(
+                            libs=_project_path("libraries") + "/*.so"
+                        ),
+                        "install {libs} /app/lib".format(
+                            libs=_project_path("libraries") + self.target + "lib/*.so"
+                        )
+                    ],
+                    "sources": [
+                        {"type": "dir", "path": build_dir}
+                    ]
+                }]
+            }
+
+            with open(manifest_file, "w") as f:
+                f.write(json.dumps(data))
+
+            return manifest_file
+
+        manifest_file = _generate_manifest()
+
+        self._run_command(
+            ["flatpak-builder", package_dir, manifest_file],
+            cwd="."
+        )
+
+    def test(self, rebuild=True):
+        if rebuild:
+            build()
+
+        raise NotImplementedError()
 
 
-def _generate_ip_bin(template, text, dest):
-    command = "export IP_TEMPLATE_FILE={template}; /opt/toolchains/dc/kos/utils/makeip/makeip {text} {dest}".format(
-        template=template, dest=dest, text=text
-    )
-    _run_docker_command(command)
+class Linux(Platform):
+    def _prepare(self, **kwargs):
+        super(Linux, self)._prepare()
 
-    return dest
-
-
-def _scramble_binary(binary, dest):
-    bin_file = splitext(binary)[0] + ".bin"
-    commands = [
-        "source /etc/bash.bashrc; sh-elf-objcopy -R .stack -O binary -S -g {} {}".format(binary, bin_file),
-        "source /etc/bash.bashrc; /opt/toolchains/dc/kos/utils/scramble/scramble {} {}".format(bin_file, dest),
-        "rm {}".format(bin_file)  # Remove intermediate file
-    ]
-
-    for command in commands:
-        _run_docker_command(command)
+        if not self.is_native:
+            raise UnsupportedPlatformError(
+                "linux-x86-gcc"
+            )
 
 
-def _generate_dc_cdi(args, build_dir):
+class Windows(Platform):
+    pass
 
-    IP_TXT_TEMPLATE = """
+
+class Dreamcast(Platform):
+    required_docker_image = "kazade/dreamcast-sdk"
+
+    def _generate_cmake_args(self):
+        args = super()._generate_cmake_args()
+        args, root = args[:-1], args[-1:]
+
+        toolchain = _find_shipped_path("toolchains/Dreamcast.cmake")
+        args += ["-DCMAKE_TOOLCHAIN_FILE=%s" % toolchain]
+
+        return args + root
+
+    def _scramble_binary(self, cwd, binary, dest):
+        bin_file = splitext(binary)[0] + ".bin"
+        commands = [
+            "source /etc/bash.bashrc; sh-elf-objcopy -R .stack -O binary -S -g {} {}".format(binary, bin_file),
+            "source /etc/bash.bashrc; /opt/toolchains/dc/kos/utils/scramble/scramble {} {}".format(bin_file, dest),
+            "rm {}".format(bin_file)  # Remove intermediate file
+        ]
+
+        print("Scrambling binary".ljust(_STR_LENGTH), end='')
+        for command in commands:
+            self._run_command(command.split(), cwd=cwd)
+        print("[ OK ]")
+
+    def _generate_ip_bin(self, cwd, template, text, dest):
+        command = "IP_TEMPLATE_FILE={template} /opt/toolchains/dc/kos/utils/makeip/makeip {text} {dest}".format(
+            template=template, dest=dest, text=text
+        ).split()
+
+
+        print("Generating IP.BIN".ljust(_STR_LENGTH), end='')
+        self._run_command(command, cwd=cwd)
+        print("[ OK ]")
+        return dest
+
+    def package(self):
+
+        IP_TXT_TEMPLATE = """
 Hardware ID   : SEGA SEGAKATANA
 Maker ID      : SEGA ENTERPRISES
 Device Info   : 0000 CD-ROM1/1
@@ -521,276 +438,221 @@ SW Maker Name : {author}
 Game Title    : {name}
 """.strip()
 
-    package_dir = join(build_dir, "package")
-    if exists(package_dir):
-        shutil.rmtree(package_dir)
+        # Perform a release rebuild
+        self.build(release=True, rebuild=True)
 
-    os.makedirs(package_dir)
+        build_dir = self._calc_build_dir(release=True)
+        package_dir = os.path.join(_project_path("packages"), self.target)
 
-    # Search for the .elf binary in the build directory
-    binary = next(x for x in os.listdir(build_dir) if x.endswith(".elf"))
-    binary = join(build_dir, binary)
+        if exists(package_dir):
+            shutil.rmtree(package_dir)
 
-    # Copy assets to the output directory
-    shutil.copytree("assets", join(package_dir, "assets"))
+        os.makedirs(package_dir)
 
-    template = _locate_toolchain_file("IP.TMPL")
+        # Search for the .elf binary in the build directory
+        binary = next(x for x in os.listdir(build_dir) if x.endswith(".elf"))
+        binary = join(build_dir, binary)
 
-    # We need to copy the template into the container so that it
-    # can be found.
-    shutil.copy(template, join(package_dir, "IP.TMPL"))
+        # Copy assets to the output directory
+        shutil.copytree("assets", join(package_dir, "assets"))
 
-    template = join(package_dir, "IP.TMPL")
-    text = join(package_dir, "ip.txt")
+        template = _find_shipped_path("toolchains/IP.TMPL")
 
-    with open("simulant.json", "r") as fin:
-        data = json.loads(fin.read())
+        # We need to copy the template into the container so that it
+        # can be found.
+        shutil.copy(template, join(package_dir, "IP.TMPL"))
 
-    with open(text, "w") as fout:
-        fout.write(IP_TXT_TEMPLATE.format(**data))
+        template = join(package_dir, "IP.TMPL")
+        text = join(package_dir, "ip.txt")
 
-    ip_bin = _generate_ip_bin(
-        join("/simulant-project", template),
-        join("/simulant-project", text),
-        join("/simulant-project", package_dir, "IP.BIN")
-    )
+        with open("simulant.json", "r") as fin:
+            data = json.loads(fin.read())
 
-    # Remove the IP.TMPL we created
-    os.remove(template)
+        with open(text, "w") as fout:
+            fout.write(IP_TXT_TEMPLATE.format(**data))
 
-    # Don't need the text file any more
-    os.remove(text)
-
-    _scramble_binary(
-        join("/simulant-project", binary),
-        join("/simulant-project", package_dir, "1ST_READ.BIN")
-    )
-
-    _run_docker_command("mkisofs -C 0,11702 -V {title} -G {ip_bin} -joliet -rock -l -o {name}.iso {package_dir}".format(
-        title=data["name"], ip_bin=ip_bin, name=data["executable"], package_dir=join("/simulant-project", package_dir)
-    ))
-
-    _run_docker_command("/opt/toolchains/dc/kos/utils/img4dc/build/cdi4dc/cdi4dc {name}.iso {name}.cdi".format(
-        name=data["executable"]
-    ))
-
-
-def package(args):
-    if not _check_project():
-        return 1
-
-    plat = args.platform
-    if plat == "native":
-        if platform.system() == "Linux":
-            plat = "linux"
-        elif platform.system() == "Windows":
-            plat = "windows"
-        else:
-            plat = "osx"
-
-    if plat == "dreamcast":
-        class Args:
-            release = True
-            platform = "dreamcast"
-
-        # Compile to .elf using docker
-        output = BuildOutput()
-        build(Args(), output)
-
-        _generate_dc_cdi(args, output.build_dir)
-
-    elif plat == "linux":
-        class Args:
-            release = True
-            platform = "native"
-            use_global_simulant = False
-
-        output = BuildOutput()
-
-        build(Args(), output)  # Trigger a release build
-        _generate_flatpak(args, output.build_dir)
-    else:
-        print("Packaging for {} is not currently supported".format(plat))
-        return 1
-
-    return 0
-
-
-def test(args):
-    return 0
-
-
-def update(args):
-    """
-        Downloads the latest binaries from Google Cloud Storage, will download the debug + release
-        binaries for the current platform, and also any cross-buildable versions (e.g. Dreamcast, Windows-on-Linux)
-    """
-    if not _check_project():
-        return 1
-
-    DOWNLOAD_ROOT = "https://storage.googleapis.com/staging.simulant-engine.appspot.com"
-
-    system = platform.system()
-
-    to_download = []
-
-    if system == "Linux":
-        to_download.extend([
-            ("linux", "release", "simulant-linux-release.zip"),
-            ("linux", "debug", "simulant-linux-debug.zip")
-        ])
-    elif system == "Darwin":
-        to_download.extend([
-            ("darwin", "release", "simulant-osx-release.zip"),
-            ("darwin", "debug", "simulant-osx-debug.zip")
-        ])
-    else:
-        print("Unsupported platform: {}".format(system))
-
-    if not args.native_only:
-        # Download cross-compile toolchains unless explicitly told not to
-        to_download.append(("dreamcast", "release", "simulant-dreamcast-release.zip"))
-
-    print("Downloading Simulant dependencies", end='', flush=True)
-
-    for i, (plat, build_type, download) in enumerate(to_download):
-        print(".", end='', flush=True)
-
-        class Args:
-            def __init__(self, platform, release):
-                self.platform = platform
-                self.release = release
-
-        target_dir = _calculate_simulant_dir(
-            Args(plat, build_type == "release")
+        ip_bin = self._generate_ip_bin(
+            package_dir,
+            template,
+            text,
+            join(package_dir, "IP.BIN")
         )
 
-        url = "{}/{}".format(DOWNLOAD_ROOT, download)
-        url = urlopen(url)
+        # Remove the IP.TMPL we created
+        os.remove(template)
 
-        with ZipFile(BytesIO(url.read())) as zipfile:
-            tempdir = tempfile.mkdtemp()
-            zipfile.extractall(path=tempdir)
+        # Don't need the text file any more
+        os.remove(text)
 
-            dest = join(target_dir, "include")
-            if exists(dest):
-                shutil.rmtree(dest)
+        self._scramble_binary(
+            package_dir,
+            binary,
+            join(package_dir, "1ST_READ.BIN")
+        )
 
-            if not exists(dirname(dest)):
-                os.makedirs(dirname(dest))
+        print("Building ISO".ljust(_STR_LENGTH), end='')
+        self._run_command(
+            "mkisofs -C 0,11702 -V {title} -G {ip_bin} -joliet -rock -l -o {name}.iso {package_dir}".format(
+                title=data["name"],
+                ip_bin=ip_bin,
+                name=data["executable"],
+                package_dir=package_dir
+            ).split(),
+            cwd=package_dir
+        )
+        print("[ OK ]")
 
-            shutil.copytree(
-                join(tempdir, splitext(download)[0], "include"),
-                join(target_dir, "include")
+        print("Generating CDI".ljust(_STR_LENGTH), end='')
+        self._run_command(
+            "/opt/toolchains/dc/kos/utils/img4dc/build/cdi4dc/cdi4dc {name}.iso {name}.cdi".format(
+                name=data["executable"]
+            ).split(),
+            cwd=package_dir
+        )
+        print("[ OK ]")
+
+        return os.path.join(package_dir, "%s.cdi" % data["executable"])
+
+    def run(self, rebuild=True, release=True):
+        supported_emulators = ("redream", "lxdream")
+        commands = {
+            "lxdream": "lxdream -b",
+            "redream": "redream"
+        }
+
+        package_dir = os.path.join(_project_path("packages"), self.target)
+
+        with open("simulant.json", "r") as fin:
+            data = json.loads(fin.read())
+
+        cdi_path = os.path.join(package_dir, data["executable"] + ".cdi")
+
+        if not os.path.exists(cdi_path) or rebuild:
+            # We need to package things up to run the dreamcast build
+            cdi_path = self.package()
+
+        for emu in supported_emulators:
+            try:
+                self._run_command(
+                    ("%s --help" % emu).split(),
+                    cwd=os.path.dirname(cdi_path),
+                    use_docker_image=False
+                )
+                break
+            except subprocess.CalledProcessError:
+                print("Unable to find %s" % emu)
+                continue
+        else:
+            print(
+                "Unable to find a supported emulator. Install one of %s" % supported_emulators
             )
+            sys.exit(1)
 
-            args = [
-                join(tempdir, splitext(download)[0], "lib", build_type),
-                join(target_dir, "lib")
-            ]
-
-            if system == "Linux" and os.path.exists(
-                    os.path.join(args[0], "libsimulant.so")):
-
-                # FIXME: This should move .so to .so.X.X.X then symlink to
-                # that, currently
-                # it does things the other way (symlinks to .so)
-
-                # Linux .so files need to be symlinked, so we do that now
-                print("\nGenerating symlinks...")
-
-                soname = open(
-                    os.path.join(args[0], "simulant.soname")
-                ).read().strip()
-
-                version = open(
-                    os.path.join(args[0], "simulant.version")
-                ).read().strip()
-
-                os.symlink(
-                    "libsimulant.so",
-                    os.path.join(args[0], "libsimulant.so.{}".format(soname))
-                )
-
-                os.symlink(
-                    "libsimulant.so",
-                    os.path.join(args[0], "libsimulant.so.{}".format(version))
-                )
-                print("Continuing download", end='', flush=True)
-
-            if exists(args[1]):
-                shutil.rmtree(args[1])
-
-            shutil.copytree(*args, symlinks=True)
-
-    print("\nDownloading assets...")
-
-    url = "{}/{}".format(DOWNLOAD_ROOT, "simulant-assets.zip")
-    url = urlopen(url)
-
-    with ZipFile(BytesIO(url.read())) as zipfile:
-        zipfile.extractall(path="assets/simulant")
-
-    print("\nDone!\n")
+        self._run_command(
+            ("%s %s" % (commands[emu], cdi_path)).split(),
+            cwd=os.path.dirname(cdi_path),
+            use_docker_image=False
+        )
 
 
-def _run_requires_package(platform):
-    return platform == "dreamcast"
+class Android(Platform):
+    required_docker_image = "kazade/android-sdk"
+    pass
 
 
-def run(args):
-    if not _check_project():
-        return 1
+def update(**kwargs):
+    print("Downloading assets")
 
-    if args.rebuild:
-        if _run_requires_package(args.platform):
-            package(args)
+    asset_dir = _project_path("assets")
+    if os.path.exists(asset_dir):
+        shutil.rmtree(asset_dir)
+
+    os.makedirs(asset_dir)
+
+    _download_zip_and_extract(
+        _DOWNLOAD_ROOT + "/master/assets.zip",
+        asset_dir
+    )
+
+    targets = ("linux-x64-gcc", "windows-x64-mingw", "dreamcast-sh4-gcc")
+
+    lib_dir = _project_path("libraries")
+    if not os.path.exists(lib_dir):
+        os.makedirs(lib_dir)
+
+    for target in targets:
+        print("Downloading files for %s".ljust(_STR_LENGTH) % target)
+
+        target_path = os.path.join(lib_dir, target)
+        if os.path.exists(target_path):
+            shutil.rmtree(target_path)
+
+        _download_zip_and_extract(
+            _DOWNLOAD_ROOT + "/master/{target}.zip".format(
+                target=target
+            ), lib_dir
+        )
+
+
+def start(name, target_folder, force=False):
+    def _sanitize_name(name):
+        return name.replace("/", "_")
+
+    name = _sanitize_name(name)
+
+    template_folder = _find_shipped_path("template")
+
+    output_folder = os.path.join(target_folder, name)
+
+    if os.path.exists(output_folder) and not force:
+        result = input("The target folder already exists and will be replaced, this cannot be undone. Continue? [y/N] ")
+        if result.lower() != "y":
+            return 0
         else:
-            build(args)  # Trigger a build
+            # Remove the directory before replacing it
+            shutil.rmtree(output_folder)
 
-    build_dir = _calculate_build_dir(args)
+    shutil.copytree(template_folder, output_folder)
 
-    with open("simulant.json") as f:
-        data = json.loads(f.read())
-        executable = data["executable"]
+    # Rename any files that have the project name in them
+    _rename_files_and_directories(
+        "__project_name__",
+        name.replace(" ", "_").lower(),
+        output_folder
+    )
 
-    env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = join(_calculate_simulant_dir(args), "lib")
+    # Replace the project name throughout
+    _search_replace("__project_name__", name, output_folder)
 
-    if args.platform == "dreamcast":
-        subprocess.call(
-            ["lxdream", "-b", executable + ".cdi"],
-            cwd=build_dir,
-            env=env
-        )
-    else:
-        subprocess.call(
-            [abspath(join(build_dir, executable))],
-            cwd=build_dir,
-            env=env
-        )
+    # These two replace with project_name or PROJECT_NAME respectively
+    _search_replace("__project_name_lower__", name.lower().replace(" ", "_"), output_folder)
+    _search_replace("__project_name_upper__", name.upper().replace(" ", "_"), output_folder)
 
-    return 0
+    pascal_name = name.replace("-", " ").title().replace(" ", "")
 
+    # Replace with ProjectName
+    _search_replace("__project_name_pascal__", pascal_name, output_folder)
 
-COMMAND_LOOKUP = {
-    'start': start,
-    'build': build,
-    'test': test,
-    'package': package,
-    'run': run,
-    'update': update
-}
+    os.chdir(output_folder)
+    update()
 
 
-def main():
+_SUPPORTED_TARGETS = [
+    "linux",
+    "windows",
+    "dreamcast",
+    "android"
+]
+
+
+def _build_args():
     parser = argparse.ArgumentParser(description="Simulant Tool")
     subs = parser.add_subparsers(dest="subcommand")
 
     build = subs.add_parser("build", help="Build your project")
-    build.add_argument("platform", default="native", nargs="?", choices=[
-        "native", "dreamcast", "android", "windows"
-    ])
+    build.add_argument("platform", default="native", nargs="?",
+        choices=["native"] + _SUPPORTED_TARGETS
+    )
     build.add_argument("--rebuild", default=False, action="store_true")
     build.add_argument("--release", default=False, action="store_true")
     build.add_argument(
@@ -799,36 +661,103 @@ def main():
     )
 
     package = subs.add_parser("package", help="Package your project for a particular platform")
-    package.add_argument("platform", default="native", nargs="?", choices=[
-        "native", "dreamcast", "android", "windows"
-    ])
+    package.add_argument("platform", default="native", nargs="?",
+        choices=["native"] + _SUPPORTED_TARGETS
+    )
 
     start = subs.add_parser("start", help="Start a new Simulant project from a template")
     start.add_argument("project", action="store", type=str)
     start.add_argument("target", default=".", nargs="?", type=str)
     start.add_argument("-f", dest="force", action="store_true")
-    start.add_argument("--native-only", action="store_true", default=False)
 
     test = subs.add_parser("test", help="Test your Simulant project")
 
     run = subs.add_parser("run", help="Run your application")
-    run.add_argument("platform", default="native", nargs="?", choices=[
-        "native", "dreamcast", "android", "windows"
-    ])
+    run.add_argument("platform", default="native", nargs="?",
+        choices=["native"] + _SUPPORTED_TARGETS
+    )
     run.add_argument("--rebuild", default=False, action="store_true")
     run.add_argument("--release", default=False, action="store_true")
 
     update = subs.add_parser("update", help="Update Simulant library")
-    update.add_argument("--native-only", action="store_true", default=False)
 
     opts = parser.parse_args()
 
-    if not opts.subcommand:
-        parser.print_help()
-        return 0
+    return opts
 
-    return COMMAND_LOOKUP[opts.subcommand](opts)
+
+def _normalize_target(target):
+    if target == "native":
+        return _native_target()
+
+    if target == "windows":
+        return "windows-x64-mingw"
+
+    if target == "linux":
+        return "linux-x64-gcc"
+
+    if target == "dreamcast":
+        return "dreamcast-sh4-gcc"
+
+    raise UnsupportedPlatformError(target)
+
+
+def _native_target():
+    if platform.system() == 'Linux':
+        if platform.machine() == 'x86_64':
+            return 'linux-x64-gcc'
+
+    raise UnsupportedPlatformError(platform.system())
+
+
+_PLATFORMS = {
+    "linux-x64-gcc": Linux,
+    "windows-x64-mingw": Windows,
+    "dreamcast-sh4-gcc": Dreamcast,
+}
+
+def main():
+    opts = _build_args()
+
+    # Start and update aren't platform specific
+    if opts.subcommand == "start":
+        return start(opts.project, opts.target, force=opts.force)
+    elif opts.subcommand == "update":
+        return update()
+
+    try:
+        this_target = _native_target()
+        target = _normalize_target(opts.platform)
+
+        platform = _PLATFORMS[target](
+            target,
+            is_native=this_target == target
+        )
+
+        if opts.subcommand == "build":
+            return platform.build(
+                release=opts.release,
+                rebuild=opts.rebuild
+            )
+        elif opts.subcommand == "run":
+            return platform.run(
+                rebuild=opts.rebuild,
+                release=opts.release
+            )
+        elif opts.subcommand == "test":
+            return platform.test()
+        elif opts.subcommand == "package":
+            return platform.package()
+        elif opts.subcommand == "debug":
+            return platform.debug()
+
+    except UnsupportedPlatformError as e:
+        print(e.message)
+        return 1
+
+    return 0
 
 
 if __name__ == '__main__':
     sys.exit(main())
+
