@@ -305,65 +305,8 @@ class Platform(object):
         )
 
     def package(self):
-        # Install flatpak sdk and runtime
-        self._run_command(
-            "flatpak install -y flathub org.freedesktop.Platform//18.08 org.freedesktop.Sdk//18.08".split(),
-            cwd="."
-        )
+        raise NotImplementedError()
 
-        # We rebuild the release build which is going to be the
-        # packaged version
-        self.build(release=True, rebuild=True)
-
-        build_dir = self._calc_build_dir(release=True)
-        package_dir = os.path.join(_project_path("packages"), self.target)
-
-        with open(_project_path("simulant.json")) as f:
-            config = json.load(f)
-
-        if os.path.exists(package_dir):
-            shutil.rmtree(package_dir)
-
-        def _generate_manifest():
-            manifest_file = os.path.join(build_dir, config["package"] + ".json")
-
-            data = {
-                "app-id": config["package"],
-                "runtime": "org.freedesktop.Platform",
-                "runtime-version": "18.08",
-                "sdk": "org.freedesktop.Sdk",
-                "command": config["executable"],
-                "modules": [{
-                    "name": config["name"],
-                    "buildsystem": "simple",
-                    "build-commands":[
-                        "install -D {executable} /app/bin/{executable}".format(
-                            executable=config["executable"]
-                        ),
-                        "install {libs} /app/lib".format(
-                            libs=_project_path("libraries") + "/*.so"
-                        ),
-                        "install {libs} /app/lib".format(
-                            libs=_project_path("libraries") + self.target + "lib/*.so"
-                        )
-                    ],
-                    "sources": [
-                        {"type": "dir", "path": build_dir}
-                    ]
-                }]
-            }
-
-            with open(manifest_file, "w") as f:
-                f.write(json.dumps(data))
-
-            return manifest_file
-
-        manifest_file = _generate_manifest()
-
-        self._run_command(
-            ["flatpak-builder", package_dir, manifest_file],
-            cwd="."
-        )
 
     def test(self, rebuild=True):
         if rebuild:
@@ -380,6 +323,98 @@ class Linux(Platform):
             raise UnsupportedPlatformError(
                 "linux-x86-gcc"
             )
+
+    def package(self):
+        # Install flatpak sdk and runtime
+        self._run_command(
+            "flatpak install -y flathub org.freedesktop.Platform//18.08 org.freedesktop.Sdk//18.08".split(),
+            cwd="."
+        )
+
+        # We rebuild the release build which is going to be the
+        # packaged version
+        self.build(release=True, rebuild=True)
+
+        build_dir = self._calc_build_dir(release=True)
+        package_dir = join(_project_path("packages"), self.target)
+        package_tmp_dir = join(_project_path("packages"), self.target + "-tmp")
+        package_build_dir = join(package_tmp_dir, "build")
+
+        with open(_project_path("simulant.json")) as f:
+            config = json.load(f)
+
+        package_name = config["package"].lower()
+
+        for folder in (package_dir, package_tmp_dir):
+            if os.path.exists(folder):
+                shutil.rmtree(folder)
+
+            os.makedirs(folder)
+
+        def _generate_manifest():
+            manifest_file = os.path.join(package_tmp_dir, package_name + ".json")
+
+            libraries_dir = join(
+                _project_path("libraries"),
+                self.target,
+                "lib"
+            )
+
+            data = {
+                "app-id": package_name,
+                "runtime": "org.freedesktop.Platform",
+                "runtime-version": "18.08",
+                "sdk": "org.freedesktop.Sdk",
+                "command": config["executable"],
+                "modules": [{
+                    "name": config["name"],
+                    "buildsystem": "simple",
+                    "build-commands":[
+                        "install -D {executable} /app/bin/{executable}".format(
+                            executable=config["executable"]
+                        ),
+                        "mkdir -p /app/lib && install -D *.so* /app/lib",
+                    ],
+                    "sources": [
+                        {"type": "dir", "path": build_dir},
+                        {"type": "dir", "path": libraries_dir}
+                    ]
+                }],
+                "finish-args": [
+                   "--socket=wayland",
+                   "--socket=x11",
+                   "--share=network",
+                   "--device=dri",
+                   "--socket=pulseaudio"
+                ],
+            }
+
+            with open(manifest_file, "w") as f:
+                f.write(json.dumps(data))
+
+            return manifest_file
+
+        manifest_file = _generate_manifest()
+
+        repo_dir = "%s/repo" % package_tmp_dir
+
+        self._run_command(
+            [
+                "flatpak-builder",
+                "--repo=%s" % repo_dir,
+                "--force-clean", package_build_dir, manifest_file
+            ],
+            cwd=_project_path(".")
+        )
+
+        self._run_command(
+            [
+                "flatpak", "build-bundle", repo_dir,
+                "%s/%s" % (package_dir, config['executable'] + ".flatpak"),
+                package_name
+            ],
+            cwd=_project_path(".")
+        )
 
 
 class Windows(Platform):
