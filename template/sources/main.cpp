@@ -41,6 +41,9 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
     config.title = "__project_name__";
     config.search_paths.push_back("assets");
 
+    // For Flatpak
+    config.search_paths.push_back(kfs::exe_dirname() + "/assets");
+
     // Dreamcast only
     config.search_paths.push_back("/cd/assets");
 

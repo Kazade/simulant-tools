@@ -373,11 +373,13 @@ class Linux(Platform):
                         "install -D {executable} /app/bin/{executable}".format(
                             executable=config["executable"]
                         ),
+                        "cp -r assets /app/bin/assets",
                         "mkdir -p /app/lib && install -D *.so* /app/lib",
                     ],
                     "sources": [
                         {"type": "dir", "path": build_dir},
-                        {"type": "dir", "path": libraries_dir}
+                        {"type": "dir", "path": libraries_dir},
+                        {"type": "dir", "path": _project_path(".")}
                     ]
                 }],
                 "finish-args": [
